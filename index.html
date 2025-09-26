@@ -22,8 +22,8 @@
 
   <div class="pill">Firmware Code</div>
   <textarea id="code"></textarea>
-  <button onclick="loadSample()">Load Sample: GPIO used before init</button>
-  <br>
+  <button onclick="loadSample()">Load Sample: Mixed Errors</button>
+
   <div class="pill">Hardware Spec JSON</div>
   <div>
     <select id="rulePackSelect">
@@ -55,11 +55,18 @@
 
 <script>
 const samples = {
-  bad_gpio: `// Using pin 5 before init
+  mixed_errors: `// Multiple mistakes mixed together
 void setup(){
-  digitalWrite(5, HIGH); // should require pinMode(5, OUTPUT) first
+  digitalWrite(5, HIGH);     // ❌ pin 5 before pinMode
+  analogWrite(9, 300);       // ❌ out of range & no pinMode(9, OUTPUT)
+  Serial.print("Booting…");  // ❌ missing Serial.begin
 }
-void loop(){}`
+void loop(){
+  digitalWrite(13, HIGH);    // ❌ pin 13 without pinMode
+  delay(1000);
+  digitalWrite(13, LOW);
+  delay(1000);
+}`
 };
 
 const rulePacks = {
@@ -88,7 +95,7 @@ const rulePacks = {
 let lastReport = null;
 
 function loadSample(){
-  document.getElementById("code").value = samples.bad_gpio;
+  document.getElementById("code").value = samples.mixed_errors;
 }
 function loadRulePack(){
   const pack = document.getElementById("rulePackSelect").value;
@@ -158,20 +165,47 @@ function autoFix(){
 
   const f=analyze(code,spec);
   const inserts=[];
+  let lines=code.split("\n");
+
+  // Fix UART
   if(f.some(v=>v.kind==="uart_begin")){
-    inserts.push(`  Serial.begin(${spec.uart.allowed_baud[0]});`);
+    const baud=spec.uart?.allowed_baud?.[0] || 9600;
+    inserts.push(`  Serial.begin(${baud});`);
   }
-  const missingPins=[...new Set(f.filter(v=>v.kind==="gpio_init"||v.kind==="pwm_mode").map(v=>v.msg.match(/\d+/)[0]))];
+
+  // Collect pins needing OUTPUT
+  const missingPins=new Set();
+  f.forEach(v=>{
+    if(v.kind==="gpio_init" || v.kind==="pwm_mode" || v.kind==="pwm_range"){
+      const m=v.msg.match(/\d+/); if(m) missingPins.add(m[0]);
+    }
+  });
   missingPins.forEach(p=>inserts.push(`  pinMode(${p}, OUTPUT);`));
 
-  let lines=code.split("\n");
+  // Clamp PWM values
+  const rng=spec.pwm?.range;
+  if(rng){
+    lines=lines.map(l=>{
+      const aw=l.match(/analogWrite\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)/);
+      if(aw){
+        const val=parseInt(aw[2]);
+        if(val<rng[0] || val>rng[1]){
+          return l.replace(val, Math.min(Math.max(val,rng[0]),rng[1]));
+        }
+      }
+      return l;
+    });
+  }
+
+  // Insert fixes after setup() line
   const idx=lines.findIndex(l=>/void\s+setup\s*\(\)\s*\{/.test(l));
   if(idx>=0 && inserts.length){
     lines.splice(idx+1,0,...inserts);
   }
+
   const fixed=lines.join("\n");
   document.getElementById("fixed").textContent=fixed;
-  if(inserts.length) document.getElementById("code").value=fixed;
+  if(inserts.length || lines!==code.split("\n")) document.getElementById("code").value=fixed;
 
   lastReport = { code, spec, violations:f, fixed };
 }
