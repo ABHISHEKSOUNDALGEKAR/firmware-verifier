@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Spec-Driven Firmware Verifier (Pyodide, no server)</title>
+  <style>
+    :root { --bg:#0b1020;--card:#121833;--muted:#8ea0ff;--text:#eef2ff;--good:#7cf37c;--bad:#ff7d7d; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial }
+    .wrap { max-width:1100px; margin:32px auto; padding:0 16px }
+    .hero { display:flex; gap:16px; align-items:center; justify-content:space-between; flex-wrap:wrap }
+    h1 { font-size:28px; margin:0 0 6px } .sub{color:var(--muted)}
+    .card { background:var(--card); border:1px solid #273069; border-radius:16px; padding:16px; box-shadow:0 10px 30px rgba(0,0,0,.25) }
+    textarea, pre { font-family:ui-monospace,monospace; width:100%; background:#0a0f21; color:var(--text);
+                    border:1px solid #2a335e; border-radius:12px; padding:12px }
+    textarea { min-height:220px }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:16px }
+    .controls { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px }
+    button { background:#1f2a60; color:var(--text); border:1px solid #3a4aa3; border-radius:12px; padding:10px 14px; cursor:pointer }
+    button.primary { background:#2443a3; border-color:#5470ff }
+    button.good { background:#114e2d; border-color:#24d268 }
+    .status { font-size:14px; color:var(--muted) }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #4150a8;
+            color:#cbd5ff; background:#0c1536; margin-right:6px }
+    .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px }
+    pre { white-space:pre-wrap; margin:0 }
+    .footer { opacity:.7; margin-top:24px; font-size:13px }
+    .ok { color:var(--good) } .fail { color:var(--bad) }
+  </style>
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"></script>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <div>
+        <h1>Spec-Driven Firmware Verifier</h1>
+        <div class="sub">Paste Arduino-style C code + choose a rule pack → get violations & auto-fixes. 100% in-browser via Pyodide.</div>
+      </div>
+      <div class="card" style="min-width:260px">
+        <div class="status" id="status">⏳ Loading Python runtime…</div>
+        <div style="font-size:12px;color:#b8c1ff">No server · No tracking · Works offline after load</div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:16px">
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div class="pill">Firmware C code</div>
+          <div class="controls">
+            <select id="sampleSelect">
+              <option value="bad_gpio">Sample: GPIO used before init (bad)</option>
+              <option value="good_gpio">Sample: GPIO correct (good)</option>
+              <option value="uart_bad">Sample: UART missing begin (bad)</option>
+              <option value="pwm_bad">Sample: PWM missing OUTPUT (bad)</option>
+            </select>
+            <button id="loadSample">Load</button>
+          </div>
+        </div>
+        <textarea id="code"></textarea>
+      </div>
+
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div class="pill">Hardware Spec (JSON)</div>
+          <div class="controls">
+            <select id="rulePackSelect">
+              <option value="default">Rule Pack: Default</option>
+              <option value="strict_gpio">Rule Pack: Strict GPIO</option>
+              <option value="uart_only">Rule Pack: UART Only</option>
+              <option value="pwm_uart">Rule Pack: PWM + UART</option>
+            </select>
+            <button id="loadRulePack">Load</button>
+          </div>
+        </div>
+        <textarea id="spec"></textarea>
+      </div>
+    </div>
+
+    <div class="controls" style="margin-top:16px">
+      <button class="primary" id="verifyBtn">Verify</button>
+      <button class="good" id="autofixBtn">Auto-Fix → Apply</button>
+      <button id="exportBtn">Export JSON</button>
+    </div>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="card"><div class="pill">Findings</div><pre id="findings">(run the verifier)</pre></div>
+      <div class="card"><div class="pill">Auto-Fixed Code (preview)</div><pre id="fixed">(no fixes yet)</pre></div>
+    </div>
+
+    <div class="footer">Built with Pyodide. With dropdowns + safe error handling 🚀</div>
+  </div>
+
+<script>
+const samples = {
+  bad_gpio: `// Using pin 5 before init
+void setup(){
+  digitalWrite(5, HIGH); // should require pinMode(5, OUTPUT) first
+}
+void loop(){}`,
+  good_gpio: `void setup(){
+  pinMode(5, OUTPUT);
+  digitalWrite(5, HIGH);
+}
+void loop(){}`,
+  uart_bad: `void setup(){
+  Serial.print("hello"); // missing Serial.begin
+}
+void loop(){}`,
+  pwm_bad: `void setup(){
+  analogWrite(9, 300); // no pinMode(9, OUTPUT)
+}
+void loop(){}`
+};
+
+const rulePacks = {
+  default: {
+    pins: { "5":{"mode":"OUTPUT","must_init":true}, "9":{"mode":"OUTPUT","must_init":true}, "13":{"mode":"OUTPUT","must_init":true} },
+    uart: { must_begin:true, allowed_baud:[9600,115200] },
+    pwm: { range:[0,255], require_output_mode:true }
+  },
+  strict_gpio: {
+    pins: { "2":{"mode":"INPUT","must_init":true}, "5":{"mode":"OUTPUT","must_init":true}, "9":{"mode":"OUTPUT","must_init":true}, "13":{"mode":"OUTPUT","must_init":true} },
+    uart: { must_begin:false }, pwm: { range:[0,255], require_output_mode:true }
+  },
+  uart_only: { pins:{}, uart:{ must_begin:true, allowed_baud:[9600] }, pwm:{} },
+  pwm_uart: {
+    pins: { "3":{"mode":"OUTPUT","must_init":true}, "9":{"mode":"OUTPUT","must_init":true} },
+    uart: { must_begin:true, allowed_baud:[9600,57600,115200] },
+    pwm: { range:[0,200], require_output_mode:true }
+  }
+};
+
+const codeEl=document.getElementById('code');
+const specEl=document.getElementById('spec');
+const findingsEl=document.getElementById('findings');
+const fixedEl=document.getElementById('fixed');
+const statusEl=document.getElementById('status');
+
+document.getElementById('loadSample').onclick=()=>{ codeEl.value=samples[document.getElementById('sampleSelect').value]; };
+document.getElementById('loadRulePack').onclick=()=>{ specEl.value=JSON.stringify(rulePacks[document.getElementById('rulePackSelect').value],null,2); };
+
+codeEl.value=samples.bad_gpio;
+specEl.value=JSON.stringify(rulePacks.default,null,2);
+
+let pyodideReady=(async()=>{
+  statusEl.textContent="⏳ Loading Pyodide…";
+  const py=await loadPyodide({indexURL:"https://cdn.jsdelivr.net/pyodide/v0.24.1/full/"});
+  statusEl.textContent="✅ Ready.";
+  await py.runPythonAsync(`
+import json, re
+def safe_result(ok, **kwargs): d={"ok":ok}; d.update(kwargs); return d
+def parse_spec(s):
+    try: return safe_result(True,spec=json.loads(s))
+    except Exception as e: return safe_result(False,error=f"Invalid JSON: {e}")
+def analyze(code,spec):
+    v=[]; pin_inited=set(); uart_began=False
+    r_pinmode=re.compile(r"pinMode\\((\\d+),\\s*(\\w+)\\)")
+    r_dwrite=re.compile(r"digitalWrite\\((\\d+),")
+    r_awrite=re.compile(r"analogWrite\\((\\d+),(\\d+)\\)")
+    r_sbegin=re.compile(r"Serial\\.begin\\((\\d+)\\)")
+    r_sio=re.compile(r"Serial\\.(print|println|write)")
+    for idx,l in enumerate(code.splitlines(),1):
+        if m:=r_pinmode.search(l): pin_inited.add(m.group(1))
+        if r_sbegin.search(l): uart_began=True
+        if m:=r_dwrite.search(l):
+            p=m.group(1)
+            if spec.get("pins",{}).get(p,{}).get("must_init") and p not in pin_inited:
+                v.append({"kind":"gpio_init","message":f"digitalWrite({p}) before pinMode","line":idx})
+        if m:=r_awrite.search(l):
+            p,val=m.groups(); val=int(val)
+            rng=spec.get("pwm",{}).get("range")
+            if rng and not(rng[0]<=val<=rng[1]): v.append({"kind":"pwm_range","message":f"analogWrite({p},{val}) outside {rng}","line":idx})
+            if spec.get("pwm",{}).get("require_output_mode") and p not in pin_inited:
+                v.append({"kind":"pwm_mode","message":f"analogWrite({p},{val}) requires pinMode({p},OUTPUT)","line":idx})
+        if r_sio.search(l) and spec.get("uart",{}).get("must_begin") and not uart_began:
+            v.append({"kind":"uart_begin","message":"Serial IO before Serial.begin","line":idx})
+    return safe_result(True,violations=v)
+def auto_fix(code,spec,analysis):
+    lines=code.splitlines(); inserts=[]
+    if any(v["kind"]=="uart_begin" for v in analysis["violations"]):
+        baud=spec.get("uart",{}).get("allowed_baud",[9600])[0]
+        inserts.append(f"  Serial.begin({baud});")
+    missing=set()
+    for v in analysis["violations"]:
+        if v["kind"] in("gpio_init","pwm_mode"):
+            m=re.search(r"(\\d+)",v["message"])
+            if m: missing.add(m.group(1))
+    for p in sorted(missing,key=int): inserts.append(f"  pinMode({p}, OUTPUT);")
+    if not inserts: return code
+    for i,l in enumerate(lines):
+        if re.match(r"void\\s+setup\\s*\\(.*\\)\\s*\\{",l):
+            return "\\n".join(lines[:i+1]+inserts+lines[i+1:])
+    return code
+def verify_entry(code,spec_str):
+    try:
+        parsed=parse_spec(spec_str)
+        if not parsed["ok"]: return safe_result(False,error=parsed["error"])
+        spec=parsed["spec"]; analysis=analyze(code,spec)
+        fixed=auto_fix(code,spec,analysis)
+        return safe_result(True,analysis=analysis,fixed=fixed)
+    except Exception as e:
+        return safe_result(False,error=f"Crash: {e}")
+  `); return py; })();
+
+async function runVerify(applyFix=false){
+  const py=await pyodideReady;
+  try{
+    py.globals.set("JS_CODE",codeEl.value);
+    py.globals.set("JS_SPEC",specEl.value);
+    const resultRaw=await py.runPythonAsync(`verify_entry(JS_CODE,JS_SPEC)`);
+    const result=resultRaw.toJs();
+    if(!result || typeof result!=="object"){ findingsEl.textContent="❌ Invalid return: "+JSON.stringify(resultRaw); return; }
+    if(!result.ok){ findingsEl.textContent="❌ "+result.error; fixedEl.textContent="(no fixes)"; return; }
+    const v=result.analysis.violations;
+    findingsEl.textContent=v.length
+      ? v.map((x,i)=>`#${i+1} ❌ [${x.kind}] line ${x.line??"-"}: ${x.message}`).join("\\n")
+      : "✅ No violations";
+    fixedEl.textContent=result.fixed;
+    if(applyFix) codeEl.value=result.fixed;
+    window.__lastReport=result;
+  }catch(e){ findingsEl.textContent="Runtime error: "+e; fixedEl.textContent="(no fixes)"; }
+}
+document.getElementById("verifyBtn").onclick=()=>runVerify(false);
+document.getElementById("autofixBtn").onclick=()=>runVerify(true);
+document.getElementById("exportBtn").onclick=()=>{
+  const blob=new Blob([JSON.stringify(window.__lastReport||{},null,2)],{type:"application/json"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="verifier_report.json";a.click();
+};
+</script>
+</body>
+</html>
