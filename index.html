@@ -13,18 +13,19 @@
     .card { background:var(--card); border:1px solid #273069; border-radius:16px; padding:16px; box-shadow:0 10px 30px rgba(0,0,0,.25) }
     textarea, pre { font-family:ui-monospace,monospace; width:100%; background:#0a0f21; color:var(--text);
                     border:1px solid #2a335e; border-radius:12px; padding:12px }
-    textarea { min-height:220px }
+    textarea { min-height:220px; resize:vertical }
     .row { display:grid; grid-template-columns:1fr 1fr; gap:16px }
     .controls { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px }
-    button { background:#1f2a60; color:var(--text); border:1px solid #3a4aa3; border-radius:12px; padding:10px 14px; cursor:pointer }
+    button { background:#1f2a60; color:var(--text); border:1px solid #3a4aa3; border-radius:12px; padding:10px 14px; cursor:pointer; font:inherit }
     button.primary { background:#2443a3; border-color:#5470ff }
     button.good { background:#114e2d; border-color:#24d268 }
+    select { background:#1f2a60; color:var(--text); border:1px solid #3a4aa3; border-radius:8px; padding:6px; font:inherit }
     .status { font-size:14px; color:var(--muted) }
     .pill { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #4150a8;
             color:#cbd5ff; background:#0c1536; margin-right:6px }
     .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px }
     pre { white-space:pre-wrap; margin:0 }
-    .footer { opacity:.7; margin-top:24px; font-size:13px }
+    .footer { opacity:.7; margin-top:24px; font-size:13px; text-align:center }
     .ok { color:var(--good) } .fail { color:var(--bad) }
   </style>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"></script>
@@ -88,7 +89,7 @@
       <div class="card"><div class="pill">Auto-Fixed Code (preview)</div><pre id="fixed">(no fixes yet)</pre></div>
     </div>
 
-    <div class="footer">Built with Pyodide. With dropdowns + deep PyProxy → JS conversion ✅</div>
+    <div class="footer">Built with Pyodide. Firmware verification made easy ✅</div>
   </div>
 
 <script>
@@ -137,113 +138,224 @@ const findingsEl=document.getElementById('findings');
 const fixedEl=document.getElementById('fixed');
 const statusEl=document.getElementById('status');
 
-document.getElementById('loadSample').onclick=()=>{ codeEl.value=samples[document.getElementById('sampleSelect').value]; };
-document.getElementById('loadRulePack').onclick=()=>{ specEl.value=JSON.stringify(rulePacks[document.getElementById('rulePackSelect').value],null,2); };
+document.getElementById('loadSample').onclick=()=>{ 
+  codeEl.value=samples[document.getElementById('sampleSelect').value]; 
+  findingsEl.textContent="(run the verifier)";
+  fixedEl.textContent="(no fixes yet)";
+};
+document.getElementById('loadRulePack').onclick=()=>{ 
+  specEl.value=JSON.stringify(rulePacks[document.getElementById('rulePackSelect').value],null,2); 
+  findingsEl.textContent="(run the verifier)";
+  fixedEl.textContent="(no fixes yet)";
+};
 
 codeEl.value=samples.bad_gpio;
 specEl.value=JSON.stringify(rulePacks.default,null,2);
 
 let pyodideReady=(async()=>{
   statusEl.textContent="⏳ Loading Pyodide…";
-  const py=await loadPyodide({indexURL:"https://cdn.jsdelivr.net/pyodide/v0.24.1/full/"});
-  statusEl.textContent="✅ Ready.";
-  await py.runPythonAsync(`
+  try {
+    const py=await loadPyodide({indexURL:"https://cdn.jsdelivr.net/pyodide/v0.24.1/full/"});
+    statusEl.textContent="✅ Ready.";
+    await py.runPythonAsync(`
 import json, re
-def safe_result(ok, **kwargs): d={"ok":ok}; d.update(kwargs); return d
+
+def safe_result(ok, **kwargs): 
+    d={"ok":ok}
+    d.update(kwargs)
+    return d
+
 def parse_spec(s):
-    try: return safe_result(True,spec=json.loads(s))
-    except Exception as e: return safe_result(False,error=f"Invalid JSON: {e}")
-def analyze(code,spec):
-    v=[]; pin_inited=set(); uart_began=False
-    r_pinmode=re.compile(r"pinMode\\((\\d+),\\s*(\\w+)\\)")
-    r_dwrite=re.compile(r"digitalWrite\\((\\d+),")
-    r_awrite=re.compile(r"analogWrite\\((\\d+),(\\d+)\\)")
-    r_sbegin=re.compile(r"Serial\\.begin\\((\\d+)\\)")
-    r_sio=re.compile(r"Serial\\.(print|println|write)")
-    for idx,l in enumerate(code.splitlines(),1):
-        if m:=r_pinmode.search(l): pin_inited.add(m.group(1))
-        if r_sbegin.search(l): uart_began=True
-        if m:=r_dwrite.search(l):
-            p=m.group(1)
-            if spec.get("pins",{}).get(p,{}).get("must_init") and p not in pin_inited:
-                v.append({"kind":"gpio_init","message":f"digitalWrite({p}) before pinMode","line":idx})
-        if m:=r_awrite.search(l):
-            p,val=m.groups(); val=int(val)
-            rng=spec.get("pwm",{}).get("range")
-            if rng and not(rng[0]<=val<=rng[1]): v.append({"kind":"pwm_range","message":f"analogWrite({p},{val}) outside {rng}","line":idx})
-            if spec.get("pwm",{}).get("require_output_mode") and p not in pin_inited:
-                v.append({"kind":"pwm_mode","message":f"analogWrite({p},{val}) requires pinMode({p},OUTPUT)","line":idx})
-        if r_sio.search(l) and spec.get("uart",{}).get("must_begin") and not uart_began:
-            v.append({"kind":"uart_begin","message":"Serial IO before Serial.begin","line":idx})
-    return safe_result(True,violations=v)
-def auto_fix(code,spec,analysis):
-    lines=code.splitlines(); inserts=[]
-    if any(v["kind"]=="uart_begin" for v in analysis["violations"]):
-        baud=spec.get("uart",{}).get("allowed_baud",[9600])[0]
+    try: 
+        return safe_result(True, spec=json.loads(s))
+    except Exception as e: 
+        return safe_result(False, error=f"Invalid JSON: {e}")
+
+def analyze(code, spec):
+    violations = []
+    pin_inited = set()
+    uart_began = False
+    
+    # Fixed regex patterns with proper escaping
+    r_pinmode = re.compile(r"pinMode\\s*\\(\\s*(\\d+)\\s*,\\s*(\\w+)\\s*\\)")
+    r_dwrite = re.compile(r"digitalWrite\\s*\\(\\s*(\\d+)\\s*,")
+    r_awrite = re.compile(r"analogWrite\\s*\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)")
+    r_sbegin = re.compile(r"Serial\\.begin\\s*\\(\\s*(\\d+)\\s*\\)")
+    r_sio = re.compile(r"Serial\\.(print|println|write)\\b")
+    
+    lines = code.splitlines()
+    for idx, line in enumerate(lines, 1):
+        # Check pinMode
+        m = r_pinmode.search(line)
+        if m:
+            pin_inited.add(m.group(1))
+        
+        # Check Serial.begin
+        if r_sbegin.search(line):
+            uart_began = True
+        
+        # Check digitalWrite
+        m = r_dwrite.search(line)
+        if m:
+            p = m.group(1)
+            pin_spec = spec.get("pins", {}).get(p, {})
+            if pin_spec.get("must_init") and p not in pin_inited:
+                violations.append({
+                    "kind": "gpio_init",
+                    "message": f"digitalWrite({p}) before pinMode({p}, OUTPUT)",
+                    "line": idx
+                })
+        
+        # Check analogWrite
+        m = r_awrite.search(line)
+        if m:
+            p, val_str = m.groups()
+            val = int(val_str)
+            pwm_spec = spec.get("pwm", {})
+            
+            # Check range
+            rng = pwm_spec.get("range")
+            if rng and not (rng[0] <= val <= rng[1]):
+                violations.append({
+                    "kind": "pwm_range",
+                    "message": f"analogWrite({p},{val}) outside range {rng}",
+                    "line": idx
+                })
+            
+            # Check pinMode requirement
+            if pwm_spec.get("require_output_mode") and p not in pin_inited:
+                violations.append({
+                    "kind": "pwm_mode",
+                    "message": f"analogWrite({p},{val}) requires pinMode({p}, OUTPUT)",
+                    "line": idx
+                })
+        
+        # Check Serial I/O
+        if r_sio.search(line) and spec.get("uart", {}).get("must_begin") and not uart_began:
+            violations.append({
+                "kind": "uart_begin",
+                "message": "Serial I/O before Serial.begin()",
+                "line": idx
+            })
+    
+    return safe_result(True, violations=violations)
+
+def auto_fix(code, spec, analysis):
+    lines = code.splitlines()
+    inserts = []
+    
+    # Add Serial.begin if needed
+    if any(v["kind"] == "uart_begin" for v in analysis["violations"]):
+        baud = spec.get("uart", {}).get("allowed_baud", [9600])[0]
         inserts.append(f"  Serial.begin({baud});")
-    missing=set()
+    
+    # Add missing pinMode declarations
+    missing_pins = set()
     for v in analysis["violations"]:
-        if v["kind"] in("gpio_init","pwm_mode"):
-            m=re.search(r"(\\d+)",v["message"])
-            if m: missing.add(m.group(1))
-    for p in sorted(missing,key=int): inserts.append(f"  pinMode({p}, OUTPUT);")
-    if not inserts: return code
-    for i,l in enumerate(lines):
-        if re.match(r"void\\s+setup\\s*\\(.*\\)\\s*\\{",l):
-            return "\\n".join(lines[:i+1]+inserts+lines[i+1:])
+        if v["kind"] in ("gpio_init", "pwm_mode"):
+            # Extract pin number from message
+            m = re.search(r"\\((\\d+)[,)]", v["message"])
+            if m:
+                missing_pins.add(m.group(1))
+    
+    for p in sorted(missing_pins, key=int):
+        inserts.append(f"  pinMode({p}, OUTPUT);")
+    
+    if not inserts:
+        return code
+    
+    # Find setup function and insert fixes
+    for i, line in enumerate(lines):
+        if re.match(r"void\\s+setup\\s*\\([^)]*\\)\\s*\\{", line.strip()):
+            return "\\n".join(lines[:i+1] + inserts + lines[i+1:])
+    
     return code
-def verify_entry(code,spec_str):
+
+def verify_entry(code, spec_str):
     try:
-        parsed=parse_spec(spec_str)
-        if not parsed["ok"]: return safe_result(False,error=parsed["error"])
-        spec=parsed["spec"]; analysis=analyze(code,spec)
-        fixed=auto_fix(code,spec,analysis)
-        return safe_result(True,analysis=analysis,fixed=fixed)
+        parsed = parse_spec(spec_str)
+        if not parsed["ok"]:
+            return safe_result(False, error=parsed["error"])
+        
+        spec = parsed["spec"]
+        analysis = analyze(code, spec)
+        
+        if not analysis["ok"]:
+            return safe_result(False, error="Analysis failed")
+        
+        fixed = auto_fix(code, spec, analysis)
+        
+        return safe_result(True, analysis=analysis, fixed=fixed)
+    
     except Exception as e:
-        return safe_result(False,error=f"Crash: {e}")
-  `); return py; })();
+        return safe_result(False, error=f"Exception: {str(e)}")
+    `);
+    return py;
+  } catch(e) {
+    statusEl.textContent="❌ Failed to load";
+    throw e;
+  }
+})();
 
 async function runVerify(applyFix=false){
-  const py=await pyodideReady;
-  try{
-    py.globals.set("JS_CODE",codeEl.value);
-    py.globals.set("JS_SPEC",specEl.value);
+  try {
+    const py = await pyodideReady;
+    
+    py.globals.set("JS_CODE", codeEl.value);
+    py.globals.set("JS_SPEC", specEl.value);
 
-    // 🔑 Deep conversion of PyProxy → plain JS (dicts → objects)
-    const resultRaw = await py.runPythonAsync(`verify_entry(JS_CODE,JS_SPEC)`);
-    const result = resultRaw.toJs({ dict_converter: Object, deep: true });
+    // Execute verification
+    const resultRaw = await py.runPythonAsync(`verify_entry(JS_CODE, JS_SPEC)`);
+    const result = resultRaw.toJs({ dict_converter: Object });
     resultRaw.destroy();
 
-    if(!result || typeof result!=="object"){
-      findingsEl.textContent="❌ Invalid return from Python";
-      fixedEl.textContent="(no fixes)";
-      return;
-    }
-    if(!result.ok){
-      findingsEl.textContent="❌ "+(result.error ?? "Unknown error");
-      fixedEl.textContent="(no fixes)";
+    if (!result || typeof result !== "object") {
+      findingsEl.textContent = "❌ Invalid result from Python";
+      fixedEl.textContent = "(no fixes)";
       return;
     }
 
-    const v = (result.analysis && result.analysis.violations) ? result.analysis.violations : [];
-    findingsEl.textContent = v.length
-      ? v.map((x,i)=>`#${i+1} ❌ [${x.kind}] line ${x.line ?? "-"}: ${x.message}`).join("\\n")
-      : "✅ No violations";
+    if (!result.ok) {
+      findingsEl.textContent = "❌ " + (result.error || "Unknown error");
+      fixedEl.textContent = "(no fixes)";
+      return;
+    }
 
-    fixedEl.textContent = result.fixed || "(no fixes)";
-    if(applyFix && result.fixed) codeEl.value = result.fixed;
+    const violations = (result.analysis && result.analysis.violations) ? result.analysis.violations : [];
+    
+    if (violations.length === 0) {
+      findingsEl.textContent = "✅ No violations found";
+      fixedEl.textContent = "(no fixes needed)";
+    } else {
+      findingsEl.textContent = violations.map((v, i) => 
+        `#${i+1} ❌ [${v.kind}] line ${v.line || "-"}: ${v.message}`
+      ).join("\\n");
+      
+      fixedEl.textContent = result.fixed || "(no fixes generated)";
+      
+      if (applyFix && result.fixed) {
+        codeEl.value = result.fixed;
+      }
+    }
 
     window.__lastReport = result;
-  }catch(e){
-    findingsEl.textContent="Runtime error: "+e;
-    fixedEl.textContent="(no fixes)";
+    
+  } catch(e) {
+    findingsEl.textContent = "❌ Runtime error: " + e.message;
+    fixedEl.textContent = "(no fixes)";
   }
 }
-document.getElementById("verifyBtn").onclick=()=>runVerify(false);
-document.getElementById("autofixBtn").onclick=()=>runVerify(true);
-document.getElementById("exportBtn").onclick=()=>{
-  const blob=new Blob([JSON.stringify(window.__lastReport||{},null,2)],{type:"application/json"});
-  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="verifier_report.json";a.click();
+
+document.getElementById("verifyBtn").onclick = () => runVerify(false);
+document.getElementById("autofixBtn").onclick = () => runVerify(true);
+document.getElementById("exportBtn").onclick = () => {
+  const report = window.__lastReport || { error: "No analysis performed" };
+  const blob = new Blob([JSON.stringify(report, null, 2)], {type: "application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "verifier_report.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
 };
 </script>
 </body>
