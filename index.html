@@ -88,7 +88,7 @@
       <div class="card"><div class="pill">Auto-Fixed Code (preview)</div><pre id="fixed">(no fixes yet)</pre></div>
     </div>
 
-    <div class="footer">Built with Pyodide. With dropdowns + safe error handling 🚀</div>
+    <div class="footer">Built with Pyodide. With dropdowns + deep PyProxy → JS conversion ✅</div>
   </div>
 
 <script>
@@ -208,18 +208,36 @@ async function runVerify(applyFix=false){
   try{
     py.globals.set("JS_CODE",codeEl.value);
     py.globals.set("JS_SPEC",specEl.value);
-    const resultRaw=await py.runPythonAsync(`verify_entry(JS_CODE,JS_SPEC)`);
-    const result=resultRaw.toJs();
-    if(!result || typeof result!=="object"){ findingsEl.textContent="❌ Invalid return: "+JSON.stringify(resultRaw); return; }
-    if(!result.ok){ findingsEl.textContent="❌ "+result.error; fixedEl.textContent="(no fixes)"; return; }
-    const v=result.analysis.violations;
-    findingsEl.textContent=v.length
-      ? v.map((x,i)=>`#${i+1} ❌ [${x.kind}] line ${x.line??"-"}: ${x.message}`).join("\\n")
+
+    // 🔑 Deep conversion of PyProxy → plain JS (dicts → objects)
+    const resultRaw = await py.runPythonAsync(`verify_entry(JS_CODE,JS_SPEC)`);
+    const result = resultRaw.toJs({ dict_converter: Object, deep: true });
+    resultRaw.destroy();
+
+    if(!result || typeof result!=="object"){
+      findingsEl.textContent="❌ Invalid return from Python";
+      fixedEl.textContent="(no fixes)";
+      return;
+    }
+    if(!result.ok){
+      findingsEl.textContent="❌ "+(result.error ?? "Unknown error");
+      fixedEl.textContent="(no fixes)";
+      return;
+    }
+
+    const v = (result.analysis && result.analysis.violations) ? result.analysis.violations : [];
+    findingsEl.textContent = v.length
+      ? v.map((x,i)=>`#${i+1} ❌ [${x.kind}] line ${x.line ?? "-"}: ${x.message}`).join("\\n")
       : "✅ No violations";
-    fixedEl.textContent=result.fixed;
-    if(applyFix) codeEl.value=result.fixed;
-    window.__lastReport=result;
-  }catch(e){ findingsEl.textContent="Runtime error: "+e; fixedEl.textContent="(no fixes)"; }
+
+    fixedEl.textContent = result.fixed || "(no fixes)";
+    if(applyFix && result.fixed) codeEl.value = result.fixed;
+
+    window.__lastReport = result;
+  }catch(e){
+    findingsEl.textContent="Runtime error: "+e;
+    fixedEl.textContent="(no fixes)";
+  }
 }
 document.getElementById("verifyBtn").onclick=()=>runVerify(false);
 document.getElementById("autofixBtn").onclick=()=>runVerify(true);
