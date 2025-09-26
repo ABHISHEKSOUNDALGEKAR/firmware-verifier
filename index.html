@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Spec-Driven Firmware Checker</title>
+<title>Firmware Verifier</title>
 <style>
   body{margin:0;background:#0d1117;color:#e6edf3;font:15px/1.5 system-ui,Segoe UI,Roboto,Arial}
   .container{max-width:1200px;margin:auto;padding:20px}
@@ -17,12 +17,13 @@
   button{padding:8px 14px;border:1px solid #30363d;border-radius:8px;cursor:pointer;background:#238636;color:white}
   button.secondary{background:#21262d;color:#e6edf3}
   select{padding:6px 8px;background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:6px}
-  .ok{color:#2ea043}.err{color:#f85149}
+  .status{margin-top:12px;padding:8px 12px;border-radius:6px;font-size:14px}
+  .ok{background:#1a472a;color:#7ee787}.err{background:#4c1a1a;color:#f85149}
 </style>
 </head>
 <body>
 <div class="container">
-  <h1>Spec-Driven Firmware Checker</h1>
+  <h1>Spec-Driven Firmware Verifier</h1>
   <div class="toolbar">
     <button id="btnCheck">Verify</button>
     <button id="btnFix">Auto-Fix → Apply</button>
@@ -49,15 +50,15 @@
   </div>
 
   <div class="grid" style="margin-top:16px">
-    <div class="card"><h3>Findings</h3><pre id="outFind">(run check)</pre></div>
-    <div class="card"><h3>Auto-Fixed Preview</h3><pre id="outFix">(no fixes yet)</pre></div>
+    <div class="card"><h3>Findings</h3><pre id="outFind">(run verifier)</pre></div>
+    <div class="card"><h3>Auto-Fixed Code (preview)</h3><pre id="outFix">(no fixes yet)</pre></div>
   </div>
+
+  <div id="statusBar" class="status">Ready</div>
 </div>
 
 <script>
-// only small useful comments (logic decisions)
-
-// demo snippets
+// example snippets
 const examples={
   gpio:`void setup(){ digitalWrite(5,HIGH); } void loop(){}`,
   uart:`void setup(){ Serial.print("x"); } void loop(){}`,
@@ -87,7 +88,7 @@ void loop(){
 }`
 };
 
-// rule sets
+// default rules
 const rules={
   pins:{ "2":{mode:"INPUT",must_init:true},"5":{mode:"OUTPUT",must_init:true},
          "9":{mode:"OUTPUT",must_init:true},"13":{mode:"OUTPUT",must_init:true}},
@@ -95,14 +96,14 @@ const rules={
   pwm:{range:[0,255],require_output_mode:true}
 };
 
-// core checker
+// core check
 function runCheck(code,spec){
   const lines=code.split("\n"), notes=[], inited=new Set(); let uart=false;
   lines.forEach((l,i)=>{
     if(/pinMode\(\s*(\d+),\s*OUTPUT/.test(l)) inited.add(RegExp.$1);
     if(/Serial\.begin/.test(l)) uart=true;
     if(/digitalWrite\(\s*(\d+)/.test(l)){
-      const p=RegExp.$1; const ps=spec.pins[p];
+      const p=RegExp.$1, ps=spec.pins[p];
       if(ps?.must_init && !inited.has(p)){
         if(ps.mode==="OUTPUT") notes.push({k:"gpio_init",line:i+1,msg:`digitalWrite(${p}) before pinMode(${p},OUTPUT)`});
         else notes.push({k:"pin_conflict",line:i+1,msg:`digitalWrite(${p}) but spec says ${ps.mode}`});
@@ -144,26 +145,32 @@ function autoFix(code,spec,viol){
   return lines.join("\n");
 }
 
-// UI wires
-const fw=fwCode,specBox=specBox,out=outFind,fixed=outFix;
-btnLoad.onclick=()=>{fw.value=examples[sampleSel.value];specBox.value=JSON.stringify(rules,null,2)};
-btnCheck.onclick=()=>{
-  let spec; try{spec=JSON.parse(specBox.value)}catch(e){out.textContent="bad JSON";return}
+// wires
+const fw=document.getElementById('fwCode'),
+      specBox=document.getElementById('specBox'),
+      out=document.getElementById('outFind'),
+      fixed=document.getElementById('outFix'),
+      statusBar=document.getElementById('statusBar');
+
+document.getElementById('btnLoad').onclick=()=>{fw.value=examples[document.getElementById('sampleSel').value];specBox.value=JSON.stringify(rules,null,2)};
+document.getElementById('btnCheck').onclick=()=>{
+  let spec; try{spec=JSON.parse(specBox.value)}catch(e){out.textContent="❌ bad JSON";statusBar.textContent="Spec JSON invalid";statusBar.className="status err";return}
   const v=runCheck(fw.value,spec);
   out.textContent=v.length?v.map((x,i)=>`#${i+1} ❌ [${x.k}] line ${x.line}: ${x.msg}`).join("\n"):"✅ No violations";
   fixed.textContent="(no fixes yet)";
+  statusBar.textContent=v.length?`${v.length} issues found`:"Clean";statusBar.className=v.length?"status err":"status ok";
 };
-btnFix.onclick=()=>{
-  let spec; try{spec=JSON.parse(specBox.value)}catch(e){out.textContent="bad JSON";return}
+document.getElementById('btnFix').onclick=()=>{
+  let spec; try{spec=JSON.parse(specBox.value)}catch(e){out.textContent="❌ bad JSON";return}
   const v=runCheck(fw.value,spec); const fix=autoFix(fw.value,spec,v);
-  fixed.textContent=fix; fw.value=fix;
+  fixed.textContent=fix; fw.value=fix; statusBar.textContent="Fixes applied";statusBar.className="status ok";
 };
-btnExport.onclick=()=>{
+document.getElementById('btnExport').onclick=()=>{
   const blob=new Blob([JSON.stringify({code:fw.value,spec:specBox.value},null,2)],{type:"application/json"});
   const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="report.json";a.click();
 };
 
-// load defaults
+// init
 fw.value=examples.mixed; specBox.value=JSON.stringify(rules,null,2);
 </script>
 </body>
