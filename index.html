@@ -1,234 +1,170 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Spec-Driven Firmware Verifier (JS version)</title>
-  <style>
-    body { font-family: system-ui, sans-serif; background:#0b1020; color:#eef2ff; margin:0; padding:20px }
-    h1 { font-size:24px; }
-    textarea, pre { width:100%; min-height:180px; background:#0a0f21; color:#fff;
-                    border:1px solid #273069; border-radius:8px; padding:10px; font-family: monospace }
-    button { margin:5px; padding:8px 12px; border-radius:6px; cursor:pointer;
-             background:#2443a3; color:white; border:1px solid #5470ff }
-    .pill { background:#121833; padding:4px 10px; border-radius:999px; margin-bottom:4px; display:inline-block }
-    .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:16px }
-    pre { white-space:pre-wrap }
-  </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Spec-Driven Firmware Checker</title>
+<style>
+  body{margin:0;background:#0d1117;color:#e6edf3;font:15px/1.5 system-ui,Segoe UI,Roboto,Arial}
+  .container{max-width:1200px;margin:auto;padding:20px}
+  h1{margin:0 0 10px;font-size:24px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .card{background:#161b22;border:1px solid #30363d;border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
+  .card h3{margin:0;padding:10px 14px;background:#21262d;font-size:13px;color:#8b949e;text-transform:uppercase}
+  textarea,pre{flex:1;min-height:220px;border:0;padding:12px;background:#0d1117;color:#e6edf3;
+    font-family:ui-monospace,Consolas,monospace;resize:vertical;white-space:pre-wrap;overflow:auto}
+  .toolbar{margin:16px 0;display:flex;flex-wrap:wrap;gap:8px}
+  button{padding:8px 14px;border:1px solid #30363d;border-radius:8px;cursor:pointer;background:#238636;color:white}
+  button.secondary{background:#21262d;color:#e6edf3}
+  select{padding:6px 8px;background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:6px}
+  .ok{color:#2ea043}.err{color:#f85149}
+</style>
 </head>
 <body>
-  <h1>Spec-Driven Firmware Verifier (JS)</h1>
-  <p>Paste Arduino C code + choose a rule pack → Findings & Auto-Fix. Runs 100% JS.</p>
-
-  <div class="pill">Firmware Code</div>
-  <textarea id="code"></textarea>
-  <button onclick="loadSample()">Load Sample: Mixed Errors</button>
-  <br>
-  <div class="pill">Hardware Spec JSON</div>
-  <div>
-    <select id="rulePackSelect">
-      <option value="default">Rule Pack: Default</option>
-      <option value="strict_gpio">Rule Pack: Strict GPIO</option>
-      <option value="uart_only">Rule Pack: UART Only</option>
-      <option value="pwm_uart">Rule Pack: PWM + UART</option>
+<div class="container">
+  <h1>Spec-Driven Firmware Checker</h1>
+  <div class="toolbar">
+    <button id="btnCheck">Verify</button>
+    <button id="btnFix">Auto-Fix → Apply</button>
+    <button class="secondary" id="btnExport">Export Report</button>
+    <select id="sampleSel">
+      <option value="gpio">GPIO bad</option>
+      <option value="uart">UART bad</option>
+      <option value="pwm">PWM bad</option>
+      <option value="mixed">Mixed errors</option>
+      <option value="clean">Golden clean</option>
     </select>
-    <button onclick="loadRulePack()">Load Rule Pack</button>
-  </div>
-  <textarea id="spec"></textarea>
-
-  <div>
-    <button onclick="verify()">Verify</button>
-    <button onclick="autoFix()">Auto-Fix → Apply</button>
-    <button onclick="exportReport()">Export JSON Report</button>
+    <button class="secondary" id="btnLoad">Load Sample</button>
   </div>
 
   <div class="grid">
-    <div>
-      <div class="pill">Findings</div>
-      <pre id="findings">(run verifier)</pre>
+    <div class="card">
+      <h3>Firmware Code</h3>
+      <textarea id="fwCode"></textarea>
     </div>
-    <div>
-      <div class="pill">Auto-Fixed Code</div>
-      <pre id="fixed">(no fixes yet)</pre>
+    <div class="card">
+      <h3>Hardware Spec JSON</h3>
+      <textarea id="specBox"></textarea>
     </div>
   </div>
 
+  <div class="grid" style="margin-top:16px">
+    <div class="card"><h3>Findings</h3><pre id="outFind">(run check)</pre></div>
+    <div class="card"><h3>Auto-Fixed Preview</h3><pre id="outFix">(no fixes yet)</pre></div>
+  </div>
+</div>
+
 <script>
-const samples = {
-  mixed_errors: `// Multiple mistakes mixed together
-void setup(){
-  pinMode(2, INPUT);          // INPUT in spec
-  digitalWrite(2, HIGH);      // ❌ misuse
-  analogWrite(9, 999);        // ❌ out of range, no OUTPUT
+// only small useful comments (logic decisions)
+
+// demo snippets
+const examples={
+  gpio:`void setup(){ digitalWrite(5,HIGH); } void loop(){}`,
+  uart:`void setup(){ Serial.print("x"); } void loop(){}`,
+  pwm:`void setup(){ analogWrite(9,300); } void loop(){}`,
+  mixed:`void setup(){
+  pinMode(2,INPUT);
+  digitalWrite(2,HIGH);
+  analogWrite(9,999);
 }
 void loop(){
-  Serial.print("Running…");   // ❌ missing Serial.begin
-  digitalWrite(13, HIGH);     // ❌ no pinMode
-  delay(1000);
-  digitalWrite(13, LOW);
-  delay(1000);
+  Serial.print("hi");
+  digitalWrite(13,HIGH);
+}`,
+  clean:`void setup(){
+  pinMode(2,INPUT);
+  pinMode(5,OUTPUT);
+  pinMode(9,OUTPUT);
+  pinMode(13,OUTPUT);
+  Serial.begin(9600);
+  digitalWrite(5,HIGH);
+  analogWrite(9,128);
+}
+void loop(){
+  Serial.print("ok");
+  digitalWrite(13,HIGH);
+  digitalWrite(13,LOW);
 }`
 };
 
-const rulePacks = {
-  default: {
-    pins: { "2": {mode:"INPUT", must_init:true}, "5": {mode:"OUTPUT", must_init:true}, "9": {mode:"OUTPUT", must_init:true}, "13": {mode:"OUTPUT", must_init:true} },
-    uart: { must_begin:true, allowed_baud:[9600,115200] },
-    pwm: { range:[0,255], require_output_mode:true }
-  },
-  strict_gpio: {
-    pins: { "2": {mode:"INPUT", must_init:true}, "5": {mode:"OUTPUT", must_init:true}, "9": {mode:"OUTPUT", must_init:true} },
-    uart: { must_begin:false },
-    pwm: { range:[0,255], require_output_mode:true }
-  },
-  uart_only: {
-    pins: {},
-    uart: { must_begin:true, allowed_baud:[9600] },
-    pwm: {}
-  },
-  pwm_uart: {
-    pins: { "3": {mode:"OUTPUT", must_init:true}, "9": {mode:"OUTPUT", must_init:true} },
-    uart: { must_begin:true, allowed_baud:[9600,57600,115200] },
-    pwm: { range:[0,200], require_output_mode:true }
-  }
+// rule sets
+const rules={
+  pins:{ "2":{mode:"INPUT",must_init:true},"5":{mode:"OUTPUT",must_init:true},
+         "9":{mode:"OUTPUT",must_init:true},"13":{mode:"OUTPUT",must_init:true}},
+  uart:{must_begin:true,allowed_baud:[9600,115200]},
+  pwm:{range:[0,255],require_output_mode:true}
 };
 
-let lastReport = null;
-
-function loadSample(){
-  document.getElementById("code").value = samples.mixed_errors;
-}
-function loadRulePack(){
-  const pack = document.getElementById("rulePackSelect").value;
-  document.getElementById("spec").value = JSON.stringify(rulePacks[pack], null, 2);
-}
-
-function analyze(code,spec){
-  const lines = code.split("\n");
-  const findings = [];
-  let pinInit = new Set();
-  let uartBegan = false;
-
-  lines.forEach((line,idx)=>{
-    if(/pinMode\s*\(\s*(\d+)\s*,\s*OUTPUT\)/.test(line)){
-      const m=line.match(/pinMode\s*\(\s*(\d+)/); if(m) pinInit.add(m[1]);
-    }
-    if(/Serial\.begin\s*\(/.test(line)){ uartBegan=true; }
-
-    const dw=line.match(/digitalWrite\s*\(\s*(\d+)/);
-    if(dw){
-      const p=dw[1];
-      if(spec.pins[p]?.must_init && !pinInit.has(p)){
-        if(spec.pins[p].mode === "OUTPUT"){
-          findings.push({kind:"gpio_init", line:idx+1, msg:`digitalWrite(${p}) before pinMode(${p},OUTPUT)`});
-        } else {
-          findings.push({kind:"pin_conflict", line:idx+1, msg:`digitalWrite(${p}) used but spec says ${spec.pins[p].mode}`});
-        }
+// core checker
+function runCheck(code,spec){
+  const lines=code.split("\n"), notes=[], inited=new Set(); let uart=false;
+  lines.forEach((l,i)=>{
+    if(/pinMode\(\s*(\d+),\s*OUTPUT/.test(l)) inited.add(RegExp.$1);
+    if(/Serial\.begin/.test(l)) uart=true;
+    if(/digitalWrite\(\s*(\d+)/.test(l)){
+      const p=RegExp.$1; const ps=spec.pins[p];
+      if(ps?.must_init && !inited.has(p)){
+        if(ps.mode==="OUTPUT") notes.push({k:"gpio_init",line:i+1,msg:`digitalWrite(${p}) before pinMode(${p},OUTPUT)`});
+        else notes.push({k:"pin_conflict",line:i+1,msg:`digitalWrite(${p}) but spec says ${ps.mode}`});
       }
     }
-
-    const aw=line.match(/analogWrite\s*\(\s*(\d+)\s*,\s*(\d+)/);
-    if(aw){
-      const p=aw[1], val=parseInt(aw[2]);
-      if(spec.pwm?.range && (val<spec.pwm.range[0] || val>spec.pwm.range[1])){
-        findings.push({kind:"pwm_range", line:idx+1, msg:`analogWrite(${p},${val}) outside ${spec.pwm.range}`});
-      }
-      if(spec.pwm?.require_output_mode && !pinInit.has(p)){
-        findings.push({kind:"pwm_mode", line:idx+1, msg:`analogWrite(${p},${val}) requires pinMode(${p},OUTPUT)`});
-      }
+    if(/analogWrite\(\s*(\d+),\s*(\d+)/.test(l)){
+      const p=RegExp.$1,val=parseInt(RegExp.$2); const rng=spec.pwm.range;
+      if(val<rng[0]||val>rng[1]) notes.push({k:"pwm_range",line:i+1,msg:`analogWrite(${p},${val}) outside ${rng}`});
+      if(spec.pwm.require_output_mode && !inited.has(p)) notes.push({k:"pwm_mode",line:i+1,msg:`analogWrite(${p},${val}) needs pinMode(${p},OUTPUT)`});
     }
-
-    if(/Serial\.(print|println|write)/.test(line) && spec.uart?.must_begin && !uartBegan){
-      findings.push({kind:"uart_begin", line:idx+1, msg:`Serial IO before Serial.begin`});
+    if(/Serial\.(print|println|write)/.test(l)&&spec.uart.must_begin&&!uart){
+      notes.push({k:"uart_begin",line:i+1,msg:`Serial used before Serial.begin`});
     }
   });
-
-  return findings;
+  return notes;
 }
 
-function verify(){
-  const code=document.getElementById("code").value;
-  let spec;
-  try{ spec=JSON.parse(document.getElementById("spec").value); }
-  catch(e){ document.getElementById("findings").textContent="❌ Spec JSON invalid: "+e; return; }
-
-  const violations=analyze(code,spec);
-  lastReport = { code, spec, violations };
-
-  document.getElementById("findings").textContent = violations.length
-    ? violations.map((x,i)=>`#${i+1} ❌ [${x.kind}] line ${x.line}: ${x.msg}`).join("\n")
-    : "✅ No violations";
-
-  document.getElementById("fixed").textContent="(no fixes yet)";
-}
-
-function autoFix(){
-  const code=document.getElementById("code").value;
-  let spec;
-  try{ spec=JSON.parse(document.getElementById("spec").value); }
-  catch(e){ document.getElementById("findings").textContent="❌ Spec JSON invalid: "+e; return; }
-
-  const f=analyze(code,spec);
-  const inserts=[];
-  let lines=code.split("\n");
-
-  // UART fixes
-  if(f.some(v=>v.kind==="uart_begin")){
-    const baud=spec.uart?.allowed_baud?.[0] || 9600;
-    inserts.push(`  Serial.begin(${baud});`);
-  }
-
-  // Collect pins needing OUTPUT (only if spec says OUTPUT)
-  const missingPins=new Set();
-  f.forEach(v=>{
-    if(v.kind==="gpio_init" || v.kind==="pwm_mode" || v.kind==="pwm_range"){
-      const m=v.msg.match(/\d+/); 
-      if(m){
-        const p=m[0];
-        if(spec.pins[p]?.mode === "OUTPUT"){
-          missingPins.add(p);
-        }
+// fix pass
+function autoFix(code,spec,viol){
+  let lines=code.split("\n"), insert=[];
+  if(viol.some(v=>v.k==="uart_begin")) insert.push(`  Serial.begin(${spec.uart.allowed_baud[0]});`);
+  const pins=new Set();
+  viol.forEach(v=>{
+    const m=v.msg.match(/\((\d+)/); if(!m) return; const p=m[1]; const ps=spec.pins[p];
+    if(v.k!=="pin_conflict"&&ps?.mode==="OUTPUT") pins.add(p);
+  });
+  [...pins].forEach(p=>insert.push(`  pinMode(${p},OUTPUT);`));
+  const rng=spec.pwm.range;
+  lines=lines.map(l=>{
+    if(/analogWrite\(\s*(\d+),\s*(\d+)/.test(l)){
+      const val=parseInt(RegExp.$2); if(val<rng[0]||val>rng[1]){
+        return l.replace(val,Math.min(Math.max(val,rng[0]),rng[1]));
       }
     }
+    return l;
   });
-  missingPins.forEach(p=>inserts.push(`  pinMode(${p}, OUTPUT);`));
-
-  // Clamp PWM values
-  const rng=spec.pwm?.range;
-  if(rng){
-    lines=lines.map(l=>{
-      const aw=l.match(/analogWrite\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)/);
-      if(aw){
-        const val=parseInt(aw[2]);
-        if(val<rng[0] || val>rng[1]){
-          return l.replace(val, Math.min(Math.max(val,rng[0]),rng[1]));
-        }
-      }
-      return l;
-    });
-  }
-
-  // Insert fixes
   const idx=lines.findIndex(l=>/void\s+setup\s*\(\)\s*\{/.test(l));
-  if(idx>=0 && inserts.length){
-    lines.splice(idx+1,0,...inserts);
-  }
-
-  const fixed=lines.join("\n");
-  document.getElementById("fixed").textContent=fixed;
-  if(inserts.length || lines!==code.split("\n")) document.getElementById("code").value=fixed;
-
-  lastReport = { code, spec, violations:f, fixed };
+  if(idx>=0&&insert.length) lines.splice(idx+1,0,...insert);
+  return lines.join("\n");
 }
 
-function exportReport(){
-  if(!lastReport){ alert("Run Verify first."); return; }
-  const blob=new Blob([JSON.stringify(lastReport,null,2)],{type:"application/json"});
-  const a=document.createElement("a");
-  a.href=URL.createObjectURL(blob);
-  a.download="verifier_report.json";
-  a.click();
-}
+// UI wires
+const fw=fwCode,specBox=specBox,out=outFind,fixed=outFix;
+btnLoad.onclick=()=>{fw.value=examples[sampleSel.value];specBox.value=JSON.stringify(rules,null,2)};
+btnCheck.onclick=()=>{
+  let spec; try{spec=JSON.parse(specBox.value)}catch(e){out.textContent="bad JSON";return}
+  const v=runCheck(fw.value,spec);
+  out.textContent=v.length?v.map((x,i)=>`#${i+1} ❌ [${x.k}] line ${x.line}: ${x.msg}`).join("\n"):"✅ No violations";
+  fixed.textContent="(no fixes yet)";
+};
+btnFix.onclick=()=>{
+  let spec; try{spec=JSON.parse(specBox.value)}catch(e){out.textContent="bad JSON";return}
+  const v=runCheck(fw.value,spec); const fix=autoFix(fw.value,spec,v);
+  fixed.textContent=fix; fw.value=fix;
+};
+btnExport.onclick=()=>{
+  const blob=new Blob([JSON.stringify({code:fw.value,spec:specBox.value},null,2)],{type:"application/json"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="report.json";a.click();
+};
+
+// load defaults
+fw.value=examples.mixed; specBox.value=JSON.stringify(rules,null,2);
 </script>
 </body>
 </html>
