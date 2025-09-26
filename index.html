@@ -57,12 +57,13 @@
 const samples = {
   mixed_errors: `// Multiple mistakes mixed together
 void setup(){
-  digitalWrite(5, HIGH);     // ❌ pin 5 before pinMode
-  analogWrite(9, 300);       // ❌ out of range & no pinMode(9, OUTPUT)
-  Serial.print("Booting…");  // ❌ missing Serial.begin
+  pinMode(2, INPUT);          // INPUT in spec
+  digitalWrite(2, HIGH);      // ❌ misuse
+  analogWrite(9, 999);        // ❌ out of range, no OUTPUT
 }
 void loop(){
-  digitalWrite(13, HIGH);    // ❌ pin 13 without pinMode
+  Serial.print("Running…");   // ❌ missing Serial.begin
+  digitalWrite(13, HIGH);     // ❌ no pinMode
   delay(1000);
   digitalWrite(13, LOW);
   delay(1000);
@@ -71,7 +72,7 @@ void loop(){
 
 const rulePacks = {
   default: {
-    pins: { "5": {mode:"OUTPUT", must_init:true}, "9": {mode:"OUTPUT", must_init:true}, "13": {mode:"OUTPUT", must_init:true} },
+    pins: { "2": {mode:"INPUT", must_init:true}, "5": {mode:"OUTPUT", must_init:true}, "9": {mode:"OUTPUT", must_init:true}, "13": {mode:"OUTPUT", must_init:true} },
     uart: { must_begin:true, allowed_baud:[9600,115200] },
     pwm: { range:[0,255], require_output_mode:true }
   },
@@ -118,7 +119,11 @@ function analyze(code,spec){
     if(dw){
       const p=dw[1];
       if(spec.pins[p]?.must_init && !pinInit.has(p)){
-        findings.push({kind:"gpio_init", line:idx+1, msg:`digitalWrite(${p}) before pinMode(${p},OUTPUT)`});
+        if(spec.pins[p].mode === "OUTPUT"){
+          findings.push({kind:"gpio_init", line:idx+1, msg:`digitalWrite(${p}) before pinMode(${p},OUTPUT)`});
+        } else {
+          findings.push({kind:"pin_conflict", line:idx+1, msg:`digitalWrite(${p}) used but spec says ${spec.pins[p].mode}`});
+        }
       }
     }
 
@@ -167,17 +172,23 @@ function autoFix(){
   const inserts=[];
   let lines=code.split("\n");
 
-  // Fix UART
+  // UART fixes
   if(f.some(v=>v.kind==="uart_begin")){
     const baud=spec.uart?.allowed_baud?.[0] || 9600;
     inserts.push(`  Serial.begin(${baud});`);
   }
 
-  // Collect pins needing OUTPUT
+  // Collect pins needing OUTPUT (only if spec says OUTPUT)
   const missingPins=new Set();
   f.forEach(v=>{
     if(v.kind==="gpio_init" || v.kind==="pwm_mode" || v.kind==="pwm_range"){
-      const m=v.msg.match(/\d+/); if(m) missingPins.add(m[0]);
+      const m=v.msg.match(/\d+/); 
+      if(m){
+        const p=m[0];
+        if(spec.pins[p]?.mode === "OUTPUT"){
+          missingPins.add(p);
+        }
+      }
     }
   });
   missingPins.forEach(p=>inserts.push(`  pinMode(${p}, OUTPUT);`));
@@ -197,7 +208,7 @@ function autoFix(){
     });
   }
 
-  // Insert fixes after setup() line
+  // Insert fixes
   const idx=lines.findIndex(l=>/void\s+setup\s*\(\)\s*\{/.test(l));
   if(idx>=0 && inserts.length){
     lines.splice(idx+1,0,...inserts);
