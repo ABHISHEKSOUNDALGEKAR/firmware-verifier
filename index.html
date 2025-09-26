@@ -36,6 +36,7 @@
       <option value="clean">Golden clean</option>
     </select>
     <button class="secondary" id="btnLoad">Load Sample</button>
+    <button class="secondary" id="btnGolden">Golden Test</button>
   </div>
 
   <div class="grid">
@@ -58,7 +59,7 @@
 </div>
 
 <script>
-// example snippets
+// samples
 const examples={
   gpio:`void setup(){ digitalWrite(5,HIGH); } void loop(){}`,
   uart:`void setup(){ Serial.print("x"); } void loop(){}`,
@@ -88,7 +89,7 @@ void loop(){
 }`
 };
 
-// default rules
+// default spec
 const rules={
   pins:{ "2":{mode:"INPUT",must_init:true},"5":{mode:"OUTPUT",must_init:true},
          "9":{mode:"OUTPUT",must_init:true},"13":{mode:"OUTPUT",must_init:true}},
@@ -96,7 +97,7 @@ const rules={
   pwm:{range:[0,255],require_output_mode:true}
 };
 
-// core check
+// checker
 function runCheck(code,spec){
   const lines=code.split("\n"), notes=[], inited=new Set(); let uart=false;
   lines.forEach((l,i)=>{
@@ -121,7 +122,7 @@ function runCheck(code,spec){
   return notes;
 }
 
-// fix pass
+// fix
 function autoFix(code,spec,viol){
   let lines=code.split("\n"), insert=[];
   if(viol.some(v=>v.k==="uart_begin")) insert.push(`  Serial.begin(${spec.uart.allowed_baud[0]});`);
@@ -170,7 +171,17 @@ document.getElementById('btnExport').onclick=()=>{
   const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="report.json";a.click();
 };
 
-// init
+// Golden test
+document.getElementById('btnGolden').onclick=()=>{
+  fw.value=examples.clean;
+  specBox.value=JSON.stringify(rules,null,2);
+  const v=runCheck(fw.value,rules);
+  out.textContent=v.length?"❌ Unexpected issues":"✅ No violations";
+  fixed.textContent="(no fixes yet)";
+  statusBar.textContent="Golden test run";statusBar.className=v.length?"status err":"status ok";
+};
+
+// init defaults
 fw.value=examples.mixed; specBox.value=JSON.stringify(rules,null,2);
 </script>
 </body>
